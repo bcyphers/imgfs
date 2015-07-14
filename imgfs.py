@@ -105,7 +105,7 @@ def store(client, file):
     # make the recursive call to store everything
     return pack_data(client, data, data_bytes)
 
-#
+# Download an image and return the raw byte stream payload
 def download(url):
     img_id = url.split('/')[-1].split('.')[0]
     path = '/tmp/' + img_id + '.png'
@@ -120,8 +120,13 @@ def download(url):
     with open(newpath, 'rb') as f:
         return f.read()[OFFSET_DOWN:]
 
-# Download and decode a generic file stored as a bitmap rooted at URL
-def get(url):
+# Decode a file stored as a bitmap rooted at the imgur file 'url'
+@imgfs.command()
+@click.option('--url')
+@click.option('--id')
+def get(url, id=None):
+    if id:
+        url =
     raw = download(url)                     # input
     outfile = open('/tmp/imgfs_out', 'wb')  # output
 
