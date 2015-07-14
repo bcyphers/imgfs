@@ -1,5 +1,6 @@
 # Python standard imports
 import base64
+import os
 import struct
 import sys
 import urllib
@@ -15,64 +16,18 @@ from imgurpython import ImgurClient
 CLIENT_ID = '49a3539b974a943'
 CLIENT_SECRET = 'c388111edc11a479283a03ed6fbe3522f52fa726'
 
-MAX_SIZE = 1048548  # max num of bytes which can fit in one bmp
-WIDTH = 708         # width of image - chosen to maxmize potential file size
-OFFSET = 26         # number of bytes in the bmp header
+MAX_SIZE = 708000   # max num of bytes which can fit in one bmp
+WIDTH = 708         # width of image - must be divisible by 12
+OFFSET_UP = 26      # number of bytes in the bmp header
+OFFSET_DOWN = 54    # number of bytes in the bmp header
 
-# Encode a generic file at `path` as a bitmap, and return a path to the
-# resulting file
-# TODO
-def encode_png(path):
-    inpf = open(path, 'rb')
-    data = inpf.read()
-    inpf.close()
+@click.group
+def imgfs():
+    pass
 
-    l = len(data)
-    size = l if l % WIDTH == 0 else l + WIDTH - (l % WIDTH)
-    assert size < MAX_SIZE
-    height = size / WIDTH
-
-    # standard PNG file header
-    f_head_bytes = bytearray(
-            [0x89,                              # Leading bit set for image
-             ord('P'), ord('N'), ord('G'),      # file type ('PNG')
-             0x0D, 0x0A,                        # CRLF
-             0x1A,                              # DOS end-of-file char
-             0x0A])                             # LF
-
-    # first heading chunk: IHDR
-    ihdr_data = ('IHDR' +                       # IHDR identifier
-            bytes(struct.pack('@i', width)) +   # width in pixels (int32)
-            bytes(struct.pack('@i', height)) +  # height in pixels (int32)
-            '\x08\x00' +                        # bit depth and color type
-            '\x00\x00\x00')                     # padding
-
-    ihdr_bytes = bytearray(
-            struct.pack('@i', 13) +                     # size of this chunk
-            ihdr_data +                                 # header and payload
-            struct.pack('@i', zlib.crc32(ihdr_data)))   # checksum
-
-
-    data_bytes = bytearray(size)
-    data_bytes[:len(data)] = data
-
-    # write the resulting byte stream to a file
-    path = '/tmp/' + base64.b16encode(str(hash(path)))[-10:] + '.png'
-    outf = open(path, 'wb')
-    outf.write(f_head_bytes + dib_head_bytes + data_bytes)
-    outf.close()
-    return path
-
-# Encode a generic file at `path` as a bitmap, and return a path to the
-# resulting file
-def encode(path):
-    inpf = open(path, 'rb')
-    data = inpf.read()
-    inpf.close()
-
-    l = len(data)
-    size = l if l % WIDTH == 0 else l + WIDTH - (l % WIDTH)
-    assert size < MAX_SIZE
+# Encode data_bytes as a bitmap, and return a path to the resulting file
+def encode(data_bytes):
+    size = len(data_bytes)
     height = size / WIDTH
 
     # generate the image header
@@ -80,7 +35,7 @@ def encode(path):
             [ord('B'), ord('M')] +                # file type ('BitMap')
             list(struct.pack('@i', size)) +       # size of BMP file in bytes
             [0, 0, 0, 0] +                        # unused
-            list(struct.pack('@i', OFFSET)))      # offset of pixel array starts
+            list(struct.pack('@i', OFFSET_UP)))   # offset of pixel array starts
 
     dib_head_bytes = bytearray(
             struct.pack('@i', 12) +         # size of this header
@@ -89,54 +44,129 @@ def encode(path):
             struct.pack('@h', 1) +          # number of color planes (1, short)
             struct.pack('@h', 24))          # number of bits per pixel
 
-    data_bytes = bytearray(size)
-    data_bytes[:4] = struct.pack('@i', len(data))
-    data_bytes[4:4+len(data)] = data
-
     # write the resulting byte stream to a file
-    path = '/tmp/' + base64.b16encode(str(hash(path)))[-10:] + '.bmp'
+    path = '/tmp/imgfs_tmp.bmp'
     outf = open(path, 'wb')
     outf.write(f_head_bytes + dib_head_bytes + data_bytes)
     outf.close()
     return path
 
-# Decodes the data bitmap at `path` and returns a path to the plain text file
-def decode(path):
-    img = Image.open(path)
-    newpath = path.replace('.png', '.bmp')
-    img.save(newpath)
+# generate bitmaps in 1MB chunks until all of the data have been stored
+def pack_data(client, data, data_bytes=None):
+    # if this is the first chunk of a file, data_bytes will come pre-packed
+    # with the filename at the head. Otherwise, start with a null byte.
+    if not data_bytes:
+        data_bytes = bytearray([0])
 
-    # parse the data from
-    offset = 40
-    f = open(newpath, 'rb')
-    data = f.read()[offset:]
-    length = struct.unpack('@i', bytearray(data[:4]))[0]
+    # store the size of the remaining file at the head
+    data_bytes.extend(struct.pack('@i', len(data)))
+    space_left = MAX_SIZE - len(data_bytes)
 
-    # write the relevant bytes to a plain text file
-    outpath = 'result'
-    outf = open(outpath, 'wb')
-    outf.write(data[4:4+length])
-    outf.close()
+    next_img = None
+    # check if the chunk is too big to fit into one file
+    if len(data) > space_left:
+        # If so, we need 7 bytes to store the next image id
+        space_left -= 7
+        # recurse with the rest of the data
+        next_img = pack_data(client, data[space_left:])
+        # link to this chunk's successor
+        data_bytes.extend(str(next_img))
+        data = data[:space_left]
 
-    return outpath
+    # now fill the rest of the space in the file with our bytes
+    data_bytes.extend(data)
+    l = len(data_bytes)
+    size = l if l % WIDTH == 0 else l + WIDTH - (l % WIDTH)
+    data_bytes.extend([0] * (size - l))
+    assert len(data_bytes) <= MAX_SIZE
 
-# Download and decode a plain text file stored as a bitmap at URL
+    # store the bytes in a bmp and upload it
+    ipath = encode(data_bytes)
+    iid = client.upload_from_path(ipath)['id']
+    print iid
+    return iid
+
+
+# Transform data from a file at path into 1MB chunks, and upload them to imgur
+@imgfs.command()
+@click.option('--file')
+def store(client, file):
+    client = ImgurClient(CLIENT_ID, CLIENT_SECRET)
+    inpf = open(file, 'rb')
+    data = inpf.read()
+    inpf.close()
+
+    # store file name and size at the head of the stream
+    data_bytes = bytearray()
+    name_len = len(os.path.basename(file))
+    assert name_len <= 255
+    data_bytes.extend([name_len] + [ord(c) for c in os.path.basename(file)])
+
+    # make the recursive call to store everything
+    return pack_data(client, data, data_bytes)
+
+#
 def download(url):
     img_id = url.split('/')[-1].split('.')[0]
     path = '/tmp/' + img_id + '.png'
     urllib.urlretrieve(url, path)
-    return decode(path)
 
-# Encode and upload a generic file at `path` to imgur, and return the URL
-def upload(client, path):
-    ipath = encode(path)
-    return client.upload_from_path(ipath)['link']
+    # convert png to bmp
+    img = Image.open(path)
+    newpath = path.replace('.png', '.bmp')
+    img.save(newpath)
+
+    # read in relevant bytes
+    with open(newpath, 'rb') as f:
+        return f.read()[OFFSET_DOWN:]
+
+# Download and decode a generic file stored as a bitmap rooted at URL
+def get(url):
+    raw = download(url)                     # input
+    outfile = open('/tmp/imgfs_out', 'wb')  # output
+
+    # while there are more chunks waiting, load them and extend the data
+    while True:
+        # parse out file name
+        name_len = ord(raw[0])
+        if name_len:
+            name = raw[1:name_len+1]
+            print name
+        pos = name_len + 1
+
+        # parse out length of file
+        file_len = struct.unpack('@i', bytearray(raw[pos:pos+4]))[0]
+        pos += 4
+        space_left = MAX_SIZE - pos
+
+        next_url = None
+        # parse id of next file, if necessary
+        if file_len > space_left:
+            next_url = 'http://i.imgur.com/%s.png' % raw[pos:pos+7]
+            pos += 7
+
+        print pos, file_len
+        print next_url
+
+        # write to the output file
+        outfile.write(raw[pos:])
+
+        # get the next chunk
+        if next_url:
+            raw = download(next_url)
+            print [ord(r) for r in raw[:10]]
+        else:
+            break
+
+    outfile.close()
+    os.rename('/tmp/imgfs_out', name)
+    return name
 
 def main():
-    client = ImgurClient(CLIENT_ID, CLIENT_SECRET)
-    url = upload(client, sys.argv[1])
+    img_id = store(client, sys.argv[1])
+    url = 'http://i.imgur.com/%s.png'%img_id
     print url
-    print download(url)
+    print fetch(url)
 
 if __name__ == '__main__':
     main()
