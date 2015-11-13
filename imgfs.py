@@ -1,4 +1,5 @@
 # Python standard imports
+import argparse
 import base64
 import os
 import struct
@@ -7,23 +8,28 @@ import urllib
 import zlib
 
 # External imports
-import click
 from PIL import Image
 from imgurpython import ImgurClient
 
+# argparse
+parser = argparse.ArgumentParser(description='Upload or or download files from imgur.com')
+parser.add_argument('--file', dest='path', help='path of file to upload')
+parser.add_argument('--url', dest='url', help='url of file to download')
+parser.add_argument('--id', dest='img_id', help='imgur id of file to download')
+parser.add_argument('--password', dest='password',
+                    help='encrypt or decrypt the file with the provided password')
+
+args = parser.parse_args()
 
 # imgur API keys
-CLIENT_ID = '49a3539b974a943'
-CLIENT_SECRET = 'c388111edc11a479283a03ed6fbe3522f52fa726'
+CLIENT_ID = os.environ('IMGUR_CLIENT')
+CLIENT_SECRET = os.environ('IMGUR_SECRET')
 
 MAX_SIZE = 708000   # max num of bytes which can fit in one bmp
 WIDTH = 708         # width of image - must be divisible by 12
 OFFSET_UP = 26      # number of bytes in the bmp header
 OFFSET_DOWN = 54    # number of bytes in the bmp header
-
-@click.group
-def imgfs():
-    pass
+URL_TEMPLATE = 'http://i.imgur.com/%s.png'
 
 # Encode data_bytes as a bitmap, and return a path to the resulting file
 def encode(data_bytes):
@@ -83,27 +89,8 @@ def pack_data(client, data, data_bytes=None):
     # store the bytes in a bmp and upload it
     ipath = encode(data_bytes)
     iid = client.upload_from_path(ipath)['id']
-    print iid
     return iid
 
-
-# Transform data from a file at path into 1MB chunks, and upload them to imgur
-@imgfs.command()
-@click.option('--file')
-def store(client, file):
-    client = ImgurClient(CLIENT_ID, CLIENT_SECRET)
-    inpf = open(file, 'rb')
-    data = inpf.read()
-    inpf.close()
-
-    # store file name and size at the head of the stream
-    data_bytes = bytearray()
-    name_len = len(os.path.basename(file))
-    assert name_len <= 255
-    data_bytes.extend([name_len] + [ord(c) for c in os.path.basename(file)])
-
-    # make the recursive call to store everything
-    return pack_data(client, data, data_bytes)
 
 # Download an image and return the raw byte stream payload
 def download(url):
@@ -120,13 +107,41 @@ def download(url):
     with open(newpath, 'rb') as f:
         return f.read()[OFFSET_DOWN:]
 
+
+def encrypt(stream, pwd):
+    aes = AES.new(pwd, AES.MODE_CBC, iv)
+    return aes.encrypt(stream)
+
+
+def decrypt(stream, pwd):
+    aes = AES.new(pwd, AES.MODE_CBC, iv)
+    return aes.decrypt(stream)
+
+
+# Transform data from a file at path into 1MB chunks, and upload them to imgur
+def up(filename, passwd=None):
+    client = ImgurClient(CLIENT_ID, CLIENT_SECRET)
+    inpf = open(filename, 'rb')
+    data = inpf.read()
+    inpf.close()
+
+    # store file name and size at the head of the stream
+    data_bytes = bytearray()
+    name_len = len(os.path.basename(filename))
+    assert name_len <= 255
+    data_bytes.extend([name_len] + [ord(c) for c in os.path.basename(filename)])
+
+    # make the recursive call to store everything
+    return pack_data(client, data, data_bytes)
+
+
 # Decode a file stored as a bitmap rooted at the imgur file 'url'
-@imgfs.command()
-@click.option('--url')
-@click.option('--id')
-def get(url, id=None):
-    if id:
-        url =
+def down(url=None, img_id=None, passwd=None):
+    if img_id:
+        url = URL_TEMPLATE % img_id
+    if not url:
+        exit(1)
+
     raw = download(url)                     # input
     outfile = open('/tmp/imgfs_out', 'wb')  # output
 
@@ -136,7 +151,7 @@ def get(url, id=None):
         name_len = ord(raw[0])
         if name_len:
             name = raw[1:name_len+1]
-            print name
+            print 'downloading file', name,
         pos = name_len + 1
 
         # parse out length of file
@@ -147,11 +162,10 @@ def get(url, id=None):
         next_url = None
         # parse id of next file, if necessary
         if file_len > space_left:
-            next_url = 'http://i.imgur.com/%s.png' % raw[pos:pos+7]
+            next_url = URL_TEMPLATE % raw[pos:pos+7]
             pos += 7
 
-        print pos, file_len
-        print next_url
+        print 'unpacking file', file_len, 'bytes'
 
         # write to the output file
         outfile.write(raw[pos:])
@@ -159,7 +173,6 @@ def get(url, id=None):
         # get the next chunk
         if next_url:
             raw = download(next_url)
-            print [ord(r) for r in raw[:10]]
         else:
             break
 
@@ -167,11 +180,26 @@ def get(url, id=None):
     os.rename('/tmp/imgfs_out', name)
     return name
 
+
 def main():
-    img_id = store(client, sys.argv[1])
-    url = 'http://i.imgur.com/%s.png'%img_id
-    print url
-    print fetch(url)
+    # download things
+    if args.url:
+        print down(url=args.url, passwd=args.password)
+        sys.exit(0)
+    if args.img_id:
+        print down(img_id=args.img_id, passwd=args.password)
+        sys.exit(0)
+
+    # upload things
+    if args.path:
+        img_id = up(args.path, passwd=args.password)
+        print 'imgur id:', img_id
+        print 'url:', URL_TEMPLATE % img_id
+        sys.exit(0)
+
+    print 'No command provided! Exiting.'
+    sys.exit(1)
+
 
 if __name__ == '__main__':
     main()
