@@ -1,6 +1,7 @@
 # Python standard imports
 import argparse
 import base64
+import json
 import os
 import struct
 import sys
@@ -13,17 +14,16 @@ from imgurpython import ImgurClient
 
 # argparse
 parser = argparse.ArgumentParser(description='Upload or or download files from imgur.com')
+parser.add_argument('keyfile', type=str, help='path to API key file')
 parser.add_argument('--file', dest='path', help='path of file to upload')
 parser.add_argument('--url', dest='url', help='url of file to download')
 parser.add_argument('--id', dest='img_id', help='imgur id of file to download')
-parser.add_argument('--password', dest='password',
-                    help='encrypt or decrypt the file with the provided password')
+
+## TODO: password protection does not work yet
+#parser.add_argument('--password', dest='password',
+                    #help='encrypt or decrypt the file with the provided password')
 
 args = parser.parse_args()
-
-# imgur API keys
-CLIENT_ID = os.environ('IMGUR_CLIENT')
-CLIENT_SECRET = os.environ('IMGUR_SECRET')
 
 MAX_SIZE = 708000   # max num of bytes which can fit in one bmp
 WIDTH = 708         # width of image - must be divisible by 12
@@ -108,6 +108,7 @@ def download(url):
         return f.read()[OFFSET_DOWN:]
 
 
+# Eventually, these will be used to encrypt and decrypt files
 def encrypt(stream, pwd):
     aes = AES.new(pwd, AES.MODE_CBC, iv)
     return aes.encrypt(stream)
@@ -151,7 +152,7 @@ def down(url=None, img_id=None, passwd=None):
         name_len = ord(raw[0])
         if name_len:
             name = raw[1:name_len+1]
-            print 'downloading file', name,
+            print 'downloading file %s...' % name
         pos = name_len + 1
 
         # parse out length of file
@@ -165,13 +166,14 @@ def down(url=None, img_id=None, passwd=None):
             next_url = URL_TEMPLATE % raw[pos:pos+7]
             pos += 7
 
-        print 'unpacking file', file_len, 'bytes'
+        print 'unpacking file chunk, length %d bytes' % file_len
 
         # write to the output file
         outfile.write(raw[pos:])
 
         # get the next chunk
         if next_url:
+            print 'downloading next chunk from', next_url
             raw = download(next_url)
         else:
             break
@@ -182,17 +184,28 @@ def down(url=None, img_id=None, passwd=None):
 
 
 def main():
+    # load imgur API keys
+    global CLIENT_ID, CLIENT_SECRET
+
+    with open(args.keyfile) as f:
+        keys = json.load(f)[0]
+
+    CLIENT_ID = keys['imgur_client']
+    CLIENT_SECRET = keys['imgur_secret']
+
+    print 'loaded keys successfully'
+
     # download things
     if args.url:
-        print down(url=args.url, passwd=args.password)
+        print down(url=args.url)
         sys.exit(0)
     if args.img_id:
-        print down(img_id=args.img_id, passwd=args.password)
+        print down(img_id=args.img_id)
         sys.exit(0)
 
     # upload things
     if args.path:
-        img_id = up(args.path, passwd=args.password)
+        img_id = up(args.path)
         print 'imgur id:', img_id
         print 'url:', URL_TEMPLATE % img_id
         sys.exit(0)
